@@ -474,3 +474,112 @@ func (c *Client) ExchangeContext(ctx context.Context, m *Msg, a string) (r *Msg,
 	c.Dialer = &net.Dialer{Timeout: timeout}
 	return c.Exchange(m, a)
 }
+
+// ExchangeContext performs a synchronous UDP query, like Exchange.
+func ExchangeCtx(ctx context.Context, m *Msg, a string) (r *Msg, err error) {
+	client := Client{Net: "udp"}
+	r, _, err = client.ExchangeCtx(ctx, m, a)
+	// ignorint rtt to leave the original ExchangeContext API unchanged, but
+	// this function will go away
+	return r, err
+}
+
+// ExchangeCtx acts like Exchange, but honors the deadline on the provided
+// context, if present.
+func (c *Client) ExchangeCtx(ctx context.Context, m *Msg, address string) (r *Msg, rtt time.Duration, err error) {
+	if c.Net == "" {
+		c.Net = "udp"
+	} else if c.Net != "udp" {
+		return nil, 0, ErrCtx
+	}
+
+	if !c.SingleInflight {
+		return c.exchangeCtx(ctx, m, address)
+	}
+
+	t := "nop"
+	if t1, ok := TypeToString[m.Question[0].Qtype]; ok {
+		t = t1
+	}
+	cl := "nop"
+	if cl1, ok := ClassToString[m.Question[0].Qclass]; ok {
+		cl = cl1
+	}
+	r, rtt, err, shared := c.group.Do(m.Question[0].Name+t+cl, func() (*Msg, time.Duration, error) {
+		return c.exchangeCtx(ctx, m, address)
+	})
+	if r != nil && shared {
+		r = r.Copy()
+	}
+	return r, rtt, err
+}
+
+func (c *Client) exchangeCtx(ctx context.Context, m *Msg, a string) (r *Msg, rtt time.Duration, err error) {
+	var co *Conn
+
+	co, err = c.DialCtx(ctx, a)
+
+	if err != nil {
+		return nil, 0, err
+	}
+	defer co.Close()
+
+	opt := m.IsEdns0()
+	// If EDNS0 is used use that for size.
+	if opt != nil && opt.UDPSize() >= MinMsgSize {
+		co.UDPSize = opt.UDPSize()
+	}
+	// Otherwise use the client's configured UDP size.
+	if opt == nil && c.UDPSize >= MinMsgSize {
+		co.UDPSize = c.UDPSize
+	}
+
+	co.TsigSecret = c.TsigSecret
+	t := time.Now()
+	// write with the appropriate write timeout
+	co.SetWriteDeadline(t.Add(c.getTimeoutForRequest(c.writeTimeout())))
+	if err = co.WriteMsg(m); err != nil {
+		return nil, 0, err
+	}
+
+	co.SetReadDeadline(time.Now().Add(c.getTimeoutForRequest(c.readTimeout())))
+	r, err = co.ReadMsg()
+	if err == nil && r.Id != m.Id {
+		err = ErrId
+	}
+	rtt = time.Since(t)
+	return r, rtt, err
+}
+
+// Dial connects to the address on the named network.
+func (c *Client) DialCtx(ctx context.Context, address string) (conn *Conn, err error) {
+	// create a new dialer with the appropriate timeout
+	var d net.Dialer
+	if c.Dialer == nil {
+		d = net.Dialer{Timeout: c.getTimeoutForRequest(c.dialTimeout())}
+	} else {
+		d = *c.Dialer
+	}
+
+	network := c.Net
+	if network == "" {
+		network = "udp"
+	}
+
+	useTLS := strings.HasPrefix(network, "tcp") && strings.HasSuffix(network, "-tls")
+
+	conn = new(Conn)
+	if useTLS {
+		//should never happen
+		network = strings.TrimSuffix(network, "-tls")
+
+		conn.Conn, err = tls.DialWithDialer(&d, network, address, c.TLSConfig)
+	} else {
+		conn.Conn, err = d.DialContext(ctx, network, address)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return conn, nil
+}

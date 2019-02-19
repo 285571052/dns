@@ -71,6 +71,7 @@ var (
 	ErrSig           error = &Error{err: "bad signature"} // ErrSig indicates that a signature can not be cryptographically validated.
 	ErrSoa           error = &Error{err: "no SOA"}        // ErrSOA indicates that no SOA RR was seen when doing zone transfers.
 	ErrTime          error = &Error{err: "bad time"}      // ErrTime indicates a timing error in TSIG authentication.
+	ErrCtx           error = &Error{err: "ExchangeCtx only support udp"}
 )
 
 // Id by default, returns a 16 bits random number to be used as a
